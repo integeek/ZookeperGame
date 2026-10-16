@@ -17,11 +17,19 @@ public class LogEntry implements Serializable {
         this.status = status;
     }
 
-    /** Une ligne de fichier : epoch;seq;op;value;status */
+    /**
+     * Converti l'entrée en texte qui peut ensuite être enregistré dans le fichier de lo.
+     * @return epoch;seq;op;value;status.
+     */
     public String toLine() {
         return epoch + ";" + seq + ";" + op + ";" + value + ";" + status;
     }
 
+    /**
+     * Construit un objet LogEntry à partir d'une ligne.
+     * @param line
+     * @return le logEntry construit
+     */
     public static LogEntry fromLine(String line) {
         String[] p = line.split(";");
         return new LogEntry(Integer.parseInt(p[0]), Integer.parseInt(p[1]),

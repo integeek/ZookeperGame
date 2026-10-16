@@ -1,6 +1,8 @@
+import java.io.IOException;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.server.UnicastRemoteObject;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -20,15 +22,25 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     private static final long TIME_BETWEEN_HEARTBEAT = 10;
     private static final long HEARTBEAT_TIMEOUT_BEFORE_ELECTION = 15_000;
     private static final long ELECTION_DURATION = 2;
+    static final int NB_NODES = 3;
+    static final int QUORUM = NB_NODES / 2 + 1;
     volatile boolean electionStarted = false;
     private ScheduledFuture<?> heartbeatTask;
+    final LeaderCoordinator coordinator = new LeaderCoordinator(this);
+    volatile boolean ready = false;
 
+    synchronized int getEpoch() { return epoch; }
+
+    private boolean isLeader() { return ready && leaderId == nodeId; }
     ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    final LogStore log;
 
-    public NodeImpl(int nodeId) throws RemoteException {
+
+    public NodeImpl(int nodeId) throws IOException {
         super();
         this.nodeId = nodeId;
         this.lastHeartbeat = System.currentTimeMillis();
+        this.log = new LogStore(nodeId);
     }
 
     /**
@@ -49,7 +61,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     public void start() {
         if (nodeId == 1) {
             leaderId = nodeId;
-
+            ready = true;
             System.out.println("Node 1 is the leader");
             scheduler.scheduleAtFixedRate(this::sendHeartBeats, 0, TIME_BETWEEN_HEARTBEAT, TimeUnit.SECONDS);
         } else {
@@ -76,8 +88,15 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     @Override
-    public int propose(int epoch, int seq, int op, int value) throws RemoteException {
-        return 0;
+    public int propose(int proposeEpoch, int proposeSeq, Op op, int value) throws RemoteException {
+        synchronized (this) {
+            if (proposeEpoch < epoch) {
+                return 0;
+            }
+        }
+        log.append(new LogEntry(proposeEpoch, proposeSeq, op, value, Status.PROPOSED));
+        System.out.println("Node " + nodeId + " logged PROPOSED (" + proposeEpoch + "," + proposeSeq + ")");
+        return 1;
     }
 
     @Override
@@ -86,8 +105,23 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     @Override
-    public int commit(int epoch, int seq) throws RemoteException {
-        return 0;
+    public int commit(int commitEpoch, int commitSeq) throws RemoteException {
+        boolean ok = log.markCommitted(commitEpoch, commitSeq);
+        if (ok) {
+            System.out.println("Node " + nodeId + " COMMITTED (" + commitEpoch + "," + commitSeq + ")");
+        }
+        return ok ? 1 : 0;
+    }
+
+    @Override
+    public int getTarget() {
+        LogEntry e = log.getLastCommitted();
+        return e == null ? -1 : e.value;
+    }
+
+    private int[] lastTag() {
+        LogEntry last = log.getLast();
+        return last == null ? new int[]{0, 0} : new int[]{last.epoch, last.seq};
     }
 
     /**
@@ -112,6 +146,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
         if (leaderId == nodeId && heartbeatTask != null) {
             heartbeatTask.cancel(false);
             heartbeatTask = null;
+            ready = false;
         }
         epoch = heartbeatEpoch;
         leaderId = from;
@@ -254,8 +289,23 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
             leaderId = nodeId;
             electionStarted = false;
         }
+        coordinator.reset();
+        ready = true;
         sendHeartBeats();
         heartbeatTask = scheduler.scheduleAtFixedRate(this::sendHeartBeats, TIME_BETWEEN_HEARTBEAT, TIME_BETWEEN_HEARTBEAT, TimeUnit.SECONDS);
+    }
+
+    // follower
+    @Override
+    public synchronized boolean syncLog(int newEpoch, int from, List<LogEntry> leaderLog) {
+        if (newEpoch < epoch) return false;
+        log.replaceAll(leaderLog);
+        log.markAllCommitted();
+        epoch = newEpoch;
+        leaderId = from;
+        lastHeartbeat = System.currentTimeMillis();
+        electionStarted = false;
+        return true;
     }
 
     /**
@@ -273,7 +323,23 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     @Override
-    public void forward(int op, int value, int from_client) throws RemoteException {
+    public int forward(Op op, int value, int fromClient) throws RemoteException {
+        System.out.println("Node " + nodeId + " received " + op + "(" + value + ") from client " + fromClient);
 
+        if (isLeader()) {
+            return coordinator.replicate(op, value);
+        }
+
+        int leader = leaderId;
+        if (leader == 0 || leader == nodeId) {
+            System.out.println("No leader available");
+            return -1;
+        }
+        try {
+            return getPeer(leader).forward(op, value, fromClient);
+        } catch (Exception e) {
+            System.out.println("Cannot forward to leader Node " + leader);
+            return -1;
+        }
     }
 }
