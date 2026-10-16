@@ -31,7 +31,10 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
 
     synchronized int getEpoch() { return epoch; }
 
-    private boolean isLeader() { return ready && leaderId == nodeId; }
+    boolean isLeader() {
+        return ready && leaderId == nodeId;
+    }
+
     ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     final LogStore log;
 
@@ -327,7 +330,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
         System.out.println("Node " + nodeId + " received " + op + "(" + value + ") from client " + fromClient);
 
         if (isLeader()) {
-            return coordinator.replicate(op, value);
+            return op == Op.WRITE ? coordinator.write(value) : coordinator.submitGuess(fromClient, value);
         }
 
         int leader = leaderId;

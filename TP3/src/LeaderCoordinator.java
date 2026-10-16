@@ -27,7 +27,46 @@ public class LeaderCoordinator {
 
     /** Appelé par becomeLeader() : le seq repart de 0 à chaque nouvelle epoch. */
     public synchronized void reset() {
-        nextSeq = 0; }
+        nextSeq = 0;
+        clearRound();
+    }
+
+    public synchronized int write(int value) {
+        if (value < 0 || value > 100) return -1;
+        clearRound();
+        return replicate(Op.WRITE, value);
+    }
+
+
+    /** @return le numéro du round en cours, ou -1 si refusé. */
+    public synchronized int submitGuess(int clientId, int value) {
+        if (value < 0 || value > 100 || node.getTarget() == -1) return -1;
+        guesses.put(clientId, value);
+        if (roundTask == null) {
+            final int epochAtStart = node.getEpoch();
+            roundTask = roundTimer.schedule(() -> closeRound(epochAtStart),
+                    ROUND_DURATION_MS, TimeUnit.MILLISECONDS);
+        }
+        System.out.println("Guess " + value + " from client " + clientId + " (" + guesses.size() + " this round)");
+        return node.getRound();
+    }
+
+    private synchronized void closeRound(int epochAtStart) {
+        roundTask = null;
+        if (guesses.isEmpty() || !node.isLeader() || node.getEpoch() != epochAtStart) {
+            guesses.clear();
+            return;
+        }
+        int target = node.getTarget();
+        int best = -1, bestDist = Integer.MAX_VALUE;
+        for (int g : guesses.values()) {
+            int d = Math.abs(g - target);
+            if (d < bestDist || (d == bestDist && g < best)) { best = g; bestDist = d; }
+        }
+        System.out.println("Round closed: guesses=" + guesses + ", target=" + target + " -> winner " + best);
+        guesses.clear();
+        replicate(Op.GUESS, best);
+    }
 
     /** @return la valeur commitée, ou -1 si le quorum n'a pas été atteint. */
     public synchronized int replicate(Op op, int value) {
