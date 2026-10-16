@@ -111,6 +111,12 @@ public class LogStore {
         return null;
     }
 
+    public synchronized int committedCount() {
+        int n = 0;
+        for (LogEntry e : entries) if (e.status == Status.COMMITTED) n++;
+        return n;
+    }
+
     public synchronized List<LogEntry> snapshot() {
         List<LogEntry> out = new ArrayList<>();
         for (LogEntry e : entries) {

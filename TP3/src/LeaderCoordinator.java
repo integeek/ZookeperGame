@@ -1,5 +1,7 @@
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 
 public class LeaderCoordinator {
@@ -11,11 +13,21 @@ public class LeaderCoordinator {
     private final NodeImpl node;
     private final ExecutorService pool = Executors.newCachedThreadPool();
     private int nextSeq = 0;
+    private static final long ROUND_DURATION_MS = 5000;
+    private final ScheduledExecutorService roundTimer = Executors.newSingleThreadScheduledExecutor();
+    private final Map<Integer, Integer> guesses = new LinkedHashMap<>();
+    private ScheduledFuture<?> roundTask;
 
     public LeaderCoordinator(NodeImpl node) { this.node = node; }
 
+    private void clearRound() {
+        guesses.clear();
+        if (roundTask != null) { roundTask.cancel(false); roundTask = null; }
+    }
+
     /** Appelé par becomeLeader() : le seq repart de 0 à chaque nouvelle epoch. */
-    public synchronized void reset() { nextSeq = 0; }
+    public synchronized void reset() {
+        nextSeq = 0; }
 
     /** @return la valeur commitée, ou -1 si le quorum n'a pas été atteint. */
     public synchronized int replicate(Op op, int value) {

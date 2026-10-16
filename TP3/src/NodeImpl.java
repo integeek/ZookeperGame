@@ -342,4 +342,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
             return -1;
         }
     }
+    @Override
+    public int getRound() { return log.committedCount(); }
+
 }

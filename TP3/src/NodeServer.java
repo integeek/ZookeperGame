@@ -17,5 +17,7 @@ public interface NodeServer extends Remote {
 
     boolean syncLog(int newEpoch, int leaderId, List<LogEntry> leaderLog) throws RemoteException;
 
+    int getRound() throws RemoteException;
+
     int getTarget() throws RemoteException;
 }
