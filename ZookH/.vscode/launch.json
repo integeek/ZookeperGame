@@ -1,0 +1,18 @@
+{
+    "configurations": [
+        {
+            "type": "java",
+            "name": "ClientApp",
+            "request": "launch",
+            "mainClass": "ClientApp",
+            "projectName": "ZookeeperLab_f4f5bc6f"
+        },
+        {
+            "type": "java",
+            "name": "MainNode",
+            "request": "launch",
+            "mainClass": "MainNode",
+            "projectName": "ZookeeperLab_f4f5bc6f"
+        }
+    ]
+}
