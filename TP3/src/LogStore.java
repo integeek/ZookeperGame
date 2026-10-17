@@ -10,15 +10,15 @@ public class LogStore {
 
     /**
      * Vérifie si le fichier existe, lit chaque ligne et reconstruit les entrées
-     * @param nodeId
+     * @param nodeId id du noeud duquel on veut récupérer les logs
      * @throws IOException
      */
     public LogStore(int nodeId) throws IOException {
         this.file = Paths.get("log-node" + nodeId + ".txt");
         if (Files.exists(file)) {
-            for (String line : Files.readAllLines(file)) {
-                if (!line.isBlank()) {
-                    entries.add(LogEntry.fromLine(line));
+            for (String logLine : Files.readAllLines(file)) {
+                if (!logLine.isBlank()) {
+                    entries.add(LogEntry.fromLine(logLine));
                 }
             }
         }
@@ -26,16 +26,18 @@ public class LogStore {
 
     /**
      * Enregistre les logs sur le disque.
+     * Convertit chaque entrée du journal en une ligne de texte, écrit les lignes dans un fichier temporaire
+     * puis remplace le fichier existant par ce fichier temporaire
      */
-    private void persist() {
+    private void persistLogEntries() {
         try {
-            List<String> lines = new ArrayList<>();
-            for (LogEntry e : entries) {
-                lines.add(e.toLine());
+            List<String> logLines = new ArrayList<>();
+            for (LogEntry logEntry : entries) {
+                logLines.add(logEntry.toLine());
             }
-            Path tmp = Paths.get(file + ".tmp");
-            Files.write(tmp, lines);
-            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+            Path temporaryFile = Paths.get(file + ".tmp");
+            Files.write(temporaryFile, logLines);
+            Files.move(temporaryFile, file, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException ex) {
             throw new UncheckedIOException(ex);
         }
@@ -43,14 +45,14 @@ public class LogStore {
 
     /**
      * Trouver une entrée grâce à son epoch et sa sequence.
-     * @param epoch epoch à rechercher.
-     * @param seq séquence à rechercher.
+     * @param epochToFind epoch à rechercher.
+     * @param seqToFind séquence à rechercher.
      * @return l'entrée si elle existe, null sinon
      */
-    private LogEntry find(int epoch, int seq) {
-        for (LogEntry e : entries) {
-            if (e.epoch == epoch && e.seq == seq) {
-                return e;
+    private LogEntry findEntryByEpochAndSequence(int epochToFind, int seqToFind) {
+        for (LogEntry logEntry : entries) {
+            if (logEntry.epoch == epochToFind && logEntry.seq == seqToFind) {
+                return logEntry;
             }
         }
         return null;
@@ -58,88 +60,101 @@ public class LogStore {
 
     /**
      * Créer une copie d'une entrée
-     * @param e l'entrée à copier
+     * @param logEntry l'entrée à copier
      * @return l'entrée copiée
      */
-    private static LogEntry copy(LogEntry e) {
-        return e == null ? null : new LogEntry(e.epoch, e.seq, e.op, e.value, e.status);
+    private static LogEntry copyLogEntry(LogEntry logEntry) {
+        return logEntry == null ? null : new LogEntry(logEntry.epoch, logEntry.seq, logEntry.op, logEntry.value, logEntry.status);
     }
 
     /**
      * Ajoute une entrée si le couple epoch, seq n'existe pas déjà.
-     * @param e entrée à ajouter.
+     * @param logEntryToAppend entrée à ajouter.
      */
-    public synchronized void append(LogEntry e) {
-        if (find(e.epoch, e.seq) != null) {
+    public synchronized void appendLogEntry(LogEntry logEntryToAppend) {
+        if (findEntryByEpochAndSequence(logEntryToAppend.epoch, logEntryToAppend.seq) != null) {
             return;
         }
-        entries.add(copy(e));
-        persist();
+        entries.add(copyLogEntry(logEntryToAppend));
+        persistLogEntries();
     }
 
     /**
      * Passe une entrée à l'état commited.
-     * @param epoch
-     * @param seq
-     * @return
+     * Recherche l'entrée à partir de son epoch et de son seq.
+     * @param targetEpoch epoch de l'entrée à commit
+     * @param targetSeq seq de l'entrée à commit
+     * @return true si l'entrée à été trouvée et marquée comme validée, false sinon
      */
-    public synchronized boolean markCommitted(int epoch, int seq) {
-        LogEntry e = find(epoch, seq);
-        if (e == null) {
+    public synchronized boolean markEntryAsCommitted(int targetEpoch, int targetSeq) {
+        LogEntry logEntry = findEntryByEpochAndSequence(targetEpoch, targetSeq);
+        if (logEntry == null) {
             return false;
         }
-        e.status = Status.COMMITTED;
-        persist();
+        logEntry.status = Status.COMMITTED;
+        persistLogEntries();
         return true;
     }
 
-    public synchronized void markAllCommitted() {
-        for (LogEntry e : entries) {
-            e.status = Status.COMMITTED;
+    /**
+     * Passe toutes les entrées à l'état commited.
+     */
+    public synchronized void markAllEntriesAsCommitted() {
+        for (LogEntry logEntry : entries) {
+            logEntry.status = Status.COMMITTED;
         }
-        persist();
+        persistLogEntries();
     }
 
-    public synchronized void replaceAll(List<LogEntry> newEntries) {
+    /**
+     * Remplace intégralement le log local par une liste d'entrées fournie.
+     * @param newEntries les entrées à enregistrer dans le journal.
+     */
+    public synchronized void replaceAllEntries(List<LogEntry> newEntries) {
         entries.clear();
-        for (LogEntry e : newEntries) {
-            entries.add(copy(e));
+        for (LogEntry logEntry : newEntries) {
+            entries.add(copyLogEntry(logEntry));
         }
-        persist();
+        persistLogEntries();
     }
 
-    public synchronized LogEntry getLast() {
-        return entries.isEmpty() ? null : copy(entries.get(entries.size() - 1));
-    }
-
-    public synchronized LogEntry getLastCommitted() {
-        for (int i = entries.size() - 1; i >= 0; i--) {
-            if (entries.get(i).status == Status.COMMITTED) {
-                return copy(entries.get(i));
+    /**
+     * Recherche la dernière entrée validée dans le journal.
+     * Parcourt le journal depuis la fin et renvoie une copie de la première entrée COMMITED rencontrée.
+     * @return une copie de la dernière entrée validée ou null s'il n'y en a pas.
+     */
+    public synchronized LogEntry getLastCommittedEntry() {
+        for (int index = entries.size() - 1; index >= 0; index--) {
+            if (entries.get(index).status == Status.COMMITTED) {
+                return copyLogEntry(entries.get(index));
             }
         }
         return null;
     }
 
-    public synchronized int committedCount() {
-        int n = 0;
-        for (LogEntry e : entries) {
-            if (e.status == Status.COMMITTED) {
-                n++;
+    /**
+     * Compte le nombre d'entrées commited dans le journal
+     * @return le nombre d'entrée dont le statut est commited
+     */
+    public synchronized int countCommittedEntries() {
+        int committedEntryCount = 0;
+        for (LogEntry logEntry : entries) {
+            if (logEntry.status == Status.COMMITTED) {
+                committedEntryCount++;
             }
         }
-        return n;
+        return committedEntryCount;
     }
 
-    public synchronized List<LogEntry> snapshot() {
-        List<LogEntry> out = new ArrayList<>();
-        for (LogEntry e : entries) {
-            out.add(copy(e));
+    /**
+     * Crée une copie des entrées actuelles du journal.
+     * @return une liste contenant des copies des entrées du journal
+     */
+    public synchronized List<LogEntry> createLogSnapshot() {
+        List<LogEntry> logSnapshot = new ArrayList<>();
+        for (LogEntry logEntry : entries) {
+            logSnapshot.add(copyLogEntry(logEntry));
         }
-        return out;
-    }
-
-    public synchronized int size() {
-        return entries.size();
+        return logSnapshot;
     }
 }

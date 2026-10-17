@@ -5,8 +5,6 @@ public interface NodeServer extends Remote {
 
     int propose(int epoch, int seq, Op op, int value) throws RemoteException;
 
-    boolean ack(int epoch, int seq, int from) throws RemoteException;
-
     int commit(int epoch, int seq) throws RemoteException;
 
     boolean heartbeat(int epoch, int from) throws RemoteException;

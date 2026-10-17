@@ -19,26 +19,19 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     int bestCandidateEpoch = -1;
     int bestCandidateSeq = -1;
 
+    private final int totalNumberOfNodes;
+    volatile boolean electionStarted = false;
+    volatile boolean leaderReady = false;
+    private ScheduledFuture<?> heartbeatTask;
+    final LeaderCoordinator coordinator = new LeaderCoordinator(this);
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    final LogStore log;
+
     private static final long TIME_BETWEEN_HEARTBEAT = 10;
     private static final long HEARTBEAT_TIMEOUT_BEFORE_ELECTION = 15_000;
     private static final long ELECTION_DURATION = 2;
     static final int NB_NODES = 3;
-    private final int totalNumberOfNodes;
     static final int QUORUM = NB_NODES / 2 + 1;
-    volatile boolean electionStarted = false;
-    private ScheduledFuture<?> heartbeatTask;
-    final LeaderCoordinator coordinator = new LeaderCoordinator(this);
-    volatile boolean ready = false;
-
-    synchronized int getEpoch() { return epoch; }
-
-    boolean isLeader() {
-        return ready && leaderId == nodeId;
-    }
-
-    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-    final LogStore log;
-
 
     public NodeImpl(int nodeId, int totalNumberOfNodes) throws IOException {
         super();
@@ -48,10 +41,19 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
         this.totalNumberOfNodes = totalNumberOfNodes;
     }
 
+    synchronized int getEpoch() {
+        return epoch;
+    }
+
+    boolean isLeader() {
+        return leaderReady && leaderId == nodeId;
+    }
+
     /**
      * Permet de retrouver un noeud grâce à son id.
+     * Permet ensuite d'appeler des méthodes à distance sur un pair.
      * @param id id du noeud que l'on veut renvoyer.
-     * @return le noeud correspondant à l'id.
+     * @return le stub RMI correspondant à l'id.
      * @throws Exception
      */
     NodeServer getPeer(int id) throws Exception {
@@ -60,13 +62,13 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
 
     /**
      * Démarre le fonctionnement du noeud, le noeud 1 est initialement le leader.
-     * Si le serveur est un leader, il envoie des heartbeat toutes les 30 secondes aux autres serveurs.
+     * Si le serveur est un leader, il envoie des heartbeat toutes les 10 secondes aux autres serveurs.
      * Sinon, le follower vérifie toutes les secondes de quand date le dernier heartbeat.
      */
     public void start() {
         if (nodeId == 1) {
             leaderId = nodeId;
-            ready = true;
+            leaderReady = true;
             System.out.println("Node 1 is the leader");
             scheduler.scheduleAtFixedRate(this::sendHeartBeats, 0, TIME_BETWEEN_HEARTBEAT, TimeUnit.SECONDS);
         } else {
@@ -76,7 +78,8 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
 
     /**
      * Méthode pour le leader.
-     * Pour chaque serveur du réseau, il vérifie si le heartbeat est reçu ou non.
+     * Envoie un hearbeat à chaque noeud du réseau pour leur signifier qu'il est vivant et communiquer son epoch et son id.
+     * Affiche aussi si le heartbeat est reçu ou non.
      */
     void sendHeartBeats() {
         for (int id = 1; id <= totalNumberOfNodes; id++) {
@@ -84,14 +87,25 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
                 continue;
             }
             try {
-                boolean received = getPeer(id).heartbeat(epoch, nodeId);
-                System.out.println("Heartbeat sent to Node " + id + ", accepted = " + received);
+                boolean heartbeatAccepted = getPeer(id).heartbeat(epoch, nodeId);
+                System.out.println("Heartbeat sent to Node " + id + ", accepted = " + heartbeatAccepted);
             } catch (Exception e) {
                 System.out.println("Cannot contact Node " + id);
             }
         }
     }
 
+    /**
+     * Fonction pour les followers.
+     * Leader envoie une proposition d'opération et chaque follower répond s'il accepte de la logger.
+     * Créer une entrée de log avec le statut proposed si la proposition ne vient pas d'un leader perimé.
+     * @param proposeEpoch epoch du leader qui émet la proposiion
+     * @param proposeSeq numéro de séquence de la proposition dans l'epoch du leader
+     * @param op opération à journaliser (WRITE ou GUESS)
+     * @param value valeur associé à l'opération
+     * @return 1 si la proposition a été journaliser (équivalent de ACK), 0 sinon
+     * @throws RemoteException
+     */
     @Override
     public int propose(int proposeEpoch, int proposeSeq, Op op, int value) throws RemoteException {
         synchronized (this) {
@@ -99,35 +113,43 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
                 return 0;
             }
         }
-        log.append(new LogEntry(proposeEpoch, proposeSeq, op, value, Status.PROPOSED));
-        System.out.println("Node " + nodeId + " logged PROPOSED (epoch = " + proposeEpoch + ", seq = " + proposeSeq + ")");
+        log.appendLogEntry(new LogEntry(proposeEpoch, proposeSeq, op, value, Status.PROPOSED));
+        System.out.println("Node " + nodeId + " logged PROPOSED (epoch = " + proposeEpoch + ", seq = " + proposeSeq + ") for " + op + "(" + value + ")");
         return 1;
     }
 
-    @Override
-    public boolean ack(int epoch, int seq, int from) throws RemoteException {
-        return false;
-    }
-
+    /**
+     * Pour les followers.
+     * LogStore recherche l'entrée identifié par le couple (epoch, seq) et fait passer son statut de PROPOSED à COMMITTED.
+     * @param commitEpoch epoch de la proposition
+     * @param commitSeq numéro de séquence de la proposition
+     * @return 1 si le commit a été effectué, 0 si échec.
+     * @throws RemoteException
+     */
     @Override
     public int commit(int commitEpoch, int commitSeq) throws RemoteException {
-        boolean ok = log.markCommitted(commitEpoch, commitSeq);
-        if (ok) {
+        boolean commitSuccessful = log.markEntryAsCommitted(commitEpoch, commitSeq);
+        if (commitSuccessful) {
             System.out.println("Node " + nodeId + " COMMITTED (epoch = " + commitEpoch + ", seq = " + commitSeq + ")");
         }
-        return ok ? 1 : 0;
+        return commitSuccessful ? 1 : 0;
     }
 
+    /**
+     * Récupère la valeur de la dernière opération validée dans le journal.
+     * @return la valeur de la dernière entrée validée, -1 sinon.
+     */
     @Override
     public int getTarget() {
-        LogEntry e = log.getLastCommitted();
-        return e == null ? -1 : e.value;
+        LogEntry lastCommitedEntry = log.getLastCommittedEntry();
+        return lastCommitedEntry == null ? -1 : lastCommitedEntry.value;
     }
 
     /**
      * Méthode pour les followers.
-     * Refuse les heartbeats provenant d'une epoch plus ancienne.
+     * Refuse les heartbeats provenant d'une epoch plus ancienne ou si le noeud est leader et reçoit un heartbeat d'un noeud d'id supérieur.
      * S'il est accepté, met à jour le leader connu, l'epoch, la date de récéption et l'état de l'élection.
+     * Le noeud arrête également sa tâche d'envoi de heartbeats.
      * @param heartbeatEpoch l'epoch du heartbeat envoyé par le leader.
      * @param from : id du leader
      * @return true si le heartbeat est accepté, false sinon
@@ -146,7 +168,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
         if (leaderId == nodeId && heartbeatTask != null) {
             heartbeatTask.cancel(false);
             heartbeatTask = null;
-            ready = false;
+            leaderReady = false;
         }
         epoch = heartbeatEpoch;
         leaderId = from;
@@ -166,8 +188,8 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
             return;
         }
 
-        long elasped = System.currentTimeMillis() - lastHeartbeat;
-        if (elasped > HEARTBEAT_TIMEOUT_BEFORE_ELECTION && !electionStarted) {
+        long timeElapsedSinceLastHeartbeat = System.currentTimeMillis() - lastHeartbeat;
+        if (timeElapsedSinceLastHeartbeat > HEARTBEAT_TIMEOUT_BEFORE_ELECTION && !electionStarted) {
             System.out.println("Node " + nodeId + " : no heartbeat received for " + HEARTBEAT_TIMEOUT_BEFORE_ELECTION + " milliseconds");
             startElection();
         }
@@ -175,9 +197,11 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
 
     /**
      * Démarre une élection.
-     * Le noeud se déclare initialement candidat, mémorise son état, diffuse sa candidature puis attend la fin.
+     * Le noeud se déclare initialement comme le meilleur candidat, mémorise son état, diffuse sa candidature puis planifie la fin.
      */
     void startElection() {
+        int currentEpoch;
+        int currentSequence;
         synchronized (this) {
             if (electionStarted) {
                 return;
@@ -186,14 +210,11 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
             bestCandidateEpoch = epoch;
             bestCandidateSeq = seq;
             bestCandidateId = nodeId;
-        }
-        int e, s;
-        synchronized (this) {
-            e = epoch;
-            s = seq;
+            currentEpoch = epoch;
+            currentSequence = seq;
         }
 
-        broadcastCandidacy(e, s);
+        broadcastCandidacy(currentEpoch, currentSequence);
         scheduler.schedule(this::finishElection, ELECTION_DURATION, TimeUnit.SECONDS);
     }
 
@@ -251,8 +272,9 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
         System.out.println("Node " + nodeId + " best candidate = Node " + bestCandidateId);
 
         if (joined) {
-            final int e = epoch, s = seq;
-            scheduler.execute(() -> broadcastCandidacy(e, s));
+            final int currentEpoch = epoch;
+            final int currentSequence = seq;
+            scheduler.execute(() -> broadcastCandidacy(currentEpoch, currentSequence));
         }
     }
 
@@ -262,17 +284,17 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
      * Sinon, il reconnait le meilleur candidat comme leader.
      */
     void finishElection() {
-        boolean iWon;
+        boolean wonElection;
         synchronized (this) {
             System.out.println("Node " + nodeId + " election result: Node " + bestCandidateId);
-            iWon = (bestCandidateId == nodeId);
-            if (!iWon) {
+            wonElection = (bestCandidateId == nodeId);
+            if (!wonElection) {
                 leaderId = bestCandidateId;
                 lastHeartbeat = System.currentTimeMillis();
                 electionStarted = false;
             }
         }
-        if (iWon) {
+        if (wonElection) {
             becomeLeader();
         } else {
             System.out.println("Node " + nodeId + " recognizes Node " + leaderId + " as leader");
@@ -281,6 +303,8 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
 
     /**
      * Fait passer ce noeud au rôle leader.
+     * Augmente l'epoch de 1 et réinitialise la séquence à 0.
+     * Envoie également ses logs à tous ses pais et attend un quorum d'ACK.
      */
     void becomeLeader() {
         synchronized (this) {
@@ -289,20 +313,30 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
             leaderId = nodeId;
             electionStarted = false;
         }
-        coordinator.reset();
-        ready = true;
+        coordinator.resetRound();
+        if (!coordinator.synchronizeFollowers()) {
+            return;
+        }
+        leaderReady = true;
         sendHeartBeats();
         heartbeatTask = scheduler.scheduleAtFixedRate(this::sendHeartBeats, TIME_BETWEEN_HEARTBEAT, TIME_BETWEEN_HEARTBEAT, TimeUnit.SECONDS);
     }
 
-    // follower
+    /**
+     * Le leader appelle cette méthode sur chaque follower pour leur imposer son log.
+     * Remplace le log local par celui du leader, marque tout COMMITED, adopter l'epoch et le leader.
+     * @param newEpoch nouvelle epoch
+     * @param from Id du nouveau leader
+     * @param leaderLog Log du leader
+     * @return true si pas d'erreur, false si le leader est perimé.
+     */
     @Override
     public synchronized boolean syncLog(int newEpoch, int from, List<LogEntry> leaderLog) {
         if (newEpoch < epoch) {
             return false;
         }
-        log.replaceAll(leaderLog);
-        log.markAllCommitted();
+        log.replaceAllEntries(leaderLog);
+        log.markAllEntriesAsCommitted();
         epoch = newEpoch;
         leaderId = from;
         lastHeartbeat = System.currentTimeMillis();
@@ -313,41 +347,55 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     /**
      * Diffuse la candidature de ce noeud à tous les autres noeuds.
      * Chaque noeud reçoit l'epoch, le numéro de séquence et l'identifiant du candidat afin de comparer les candidatures.
-     * @param e epoch du candidat
-     * @param s numéro de séquence du candidat
+     * @param candidateEpoch epoch du candidat
+     * @param candidateSequence numéro de séquence du candidat
      */
-    void broadcastCandidacy(int e, int s) {
+    void broadcastCandidacy(int candidateEpoch, int candidateSequence) {
         for (int id = 1; id <= totalNumberOfNodes; id++) {
             if (id == nodeId) {
                 continue;
             }
             try {
-                getPeer(id).election(e, s, nodeId);
+                getPeer(id).election(candidateEpoch, candidateSequence, nodeId);
             }
-            catch (Exception ex) { System.out.println("Cannot contact Node " + id); }
+            catch (Exception ex) {
+                System.out.println("Cannot contact Node " + id);
+            }
         }
     }
 
+    /**
+     * Si le noeud est leader, il traite la requete.
+     * Sinon, il la relaie au leader.
+     * @param op opération reçue par le noeud
+     * @param value valeur reçue par le noeud
+     * @param fromClient client d'origine.
+     * @return si write, la valeur commitée, pour guess, le numéro de round et -1 so refus.
+     * @throws RemoteException
+     */
     @Override
     public int forward(Op op, int value, int fromClient) throws RemoteException {
         System.out.println("Node " + nodeId + " received " + op + "(" + value + ") from client " + fromClient);
 
         if (isLeader()) {
-            return op == Op.WRITE ? coordinator.write(value) : coordinator.submitGuess(fromClient, value);
+            return op == Op.WRITE ? coordinator.writeAndReplicate(value) : coordinator.submitGuess(fromClient, value);
         }
 
-        int leader = leaderId;
-        if (leader == 0 || leader == nodeId) {
+        int knownLeaderId = leaderId;
+        if (knownLeaderId == 0 || knownLeaderId == nodeId) {
             System.out.println("No leader available");
             return -1;
         }
         try {
-            return getPeer(leader).forward(op, value, fromClient);
+            return getPeer(knownLeaderId).forward(op, value, fromClient);
         } catch (Exception e) {
-            System.out.println("Cannot forward to leader Node " + leader);
+            System.out.println("Cannot forward to leader Node " + knownLeaderId);
             return -1;
         }
     }
+
     @Override
-    public int getRound() { return log.committedCount(); }
+    public int getRound() {
+        return log.countCommittedEntries();
+    }
 }

@@ -5,142 +5,193 @@ import java.util.Map;
 import java.util.concurrent.*;
 
 public class LeaderCoordinator {
+    private final NodeImpl localNode;
+    private final ExecutorService pool = Executors.newCachedThreadPool();
+    private int nextSeq = 0;
+    private final ScheduledExecutorService roundTimer = Executors.newSingleThreadScheduledExecutor();
+    private final Map<Integer, Integer> guesses = new LinkedHashMap<>();
+    private ScheduledFuture<?> roundTask;
+
     private static final long ACK_TIMEOUT_MS = 2000;
+    private static final long ROUND_DURATION_MS = 5000;
 
     @FunctionalInterface
     private interface PeerCall {
         boolean run(NodeServer peer) throws Exception;
     }
 
-    private final NodeImpl node;
-    private final ExecutorService pool = Executors.newCachedThreadPool();
-    private int nextSeq = 0;
-    private static final long ROUND_DURATION_MS = 5000;
-    private final ScheduledExecutorService roundTimer = Executors.newSingleThreadScheduledExecutor();
-    private final Map<Integer, Integer> guesses = new LinkedHashMap<>();
-    private ScheduledFuture<?> roundTask;
+    public LeaderCoordinator(NodeImpl localNode) {
+        this.localNode = localNode;
+    }
 
-    public LeaderCoordinator(NodeImpl node) { this.node = node; }
-
-    private void clearRound() {
+    /**
+     * Abandonne le round en cours en effaçant tous les guess et en empéchant la tâche de s'exécuter.
+     */
+    private void cancelCurrentRound() {
         guesses.clear();
-        if (roundTask != null) { roundTask.cancel(false); roundTask = null; }
+        if (roundTask != null) {
+            roundTask.cancel(false);
+            roundTask = null;
+        }
     }
 
-    /** Appelé par becomeLeader() : le seq repart de 0 à chaque nouvelle epoch. */
-    public synchronized void reset() {
+    public synchronized void resetRound() {
         nextSeq = 0;
-        clearRound();
+        cancelCurrentRound();
     }
 
-    public synchronized int write(int value) {
-        if (value < 0 || value > 100) {
+    /**
+     * Méthode du leader qui traite une écrite d'un client.
+     * Seule les valeurs de 0 à 100 sont acceptées.
+     * @param valueToWrite la valeur à écrire
+     * @return la valeur si l'entrée est commitée, -1 sinon
+     */
+    public synchronized int writeAndReplicate(int valueToWrite) {
+        if (valueToWrite < 0 || valueToWrite > 100) {
             return -1;
         }
-        clearRound();
-        return replicate(Op.WRITE, value);
+        cancelCurrentRound();
+        return replicateOperation(Op.WRITE, valueToWrite);
     }
 
 
-    /** @return le numéro du round en cours, ou -1 si refusé. */
-    public synchronized int submitGuess(int clientId, int value) {
-        if (value < 0 || value > 100 || node.getTarget() == -1) {
+    /**
+     * Enreigstre le guess d'un client dans le round en cours. Au premier guess, lance un compteur de 5 secondes.
+     * 2 refus possibles : valeurs hors des limites ou pas de target commitée.
+     * @param clientId id du client ayant fait le guess
+     * @param guessValue valeur envoyée
+     * @return le numéro du round, -1 si un problème
+     */
+    public synchronized int submitGuess(int clientId, int guessValue) {
+        if (guessValue < 0 || guessValue > 100 || localNode.getTarget() == -1) {
             return -1;
         }
-        guesses.put(clientId, value);
+        guesses.put(clientId, guessValue);
         if (roundTask == null) {
-            final int epochAtStart = node.getEpoch();
+            final int epochAtStart = localNode.getEpoch();
             roundTask = roundTimer.schedule(() -> closeRound(epochAtStart), ROUND_DURATION_MS, TimeUnit.MILLISECONDS);
         }
-        System.out.println("Guess " + value + " from client " + clientId + " (" + guesses.size() + " this round)");
-        return node.getRound();
+        System.out.println("Guess " + guessValue + " from client " + clientId + " (" + guesses.size() + " this round)");
+        return localNode.getRound();
     }
 
+    /**
+     * Méthode appelée 5 secodes après le premier guess.
+     * Désigne le gagnant du round (le guess le plus proche de la target) et le réplique comme la nouvelle valeur commitée.
+     * Round abandonné s'il n'y a pas de guess, le noeud n'est plus leader ou si les guess datent d'un autre mandat.
+     * @param epochAtStart
+     */
     private synchronized void closeRound(int epochAtStart) {
         roundTask = null;
-        if (guesses.isEmpty() || !node.isLeader() || node.getEpoch() != epochAtStart) {
+        if (guesses.isEmpty() || !localNode.isLeader() || localNode.getEpoch() != epochAtStart) {
             guesses.clear();
             return;
         }
-        int target = node.getTarget();
-        int best = -1, bestDist = Integer.MAX_VALUE;
-        for (int g : guesses.values()) {
-            int d = Math.abs(g - target);
-            if (d < bestDist || (d == bestDist && g < best)) {
-                best = g;
-                bestDist = d;
+        int targetValue = localNode.getTarget();
+        int winningGuess = -1;
+        int smallestDistance = Integer.MAX_VALUE;
+        for (int guess : guesses.values()) {
+            int distance = Math.abs(guess - targetValue);
+            //Le gagnant est le plus proche de la cible, si égalité, c'est le plus petit guess si gagne
+            if (distance < smallestDistance || (distance == smallestDistance && guess < winningGuess)) {
+                winningGuess = guess;
+                smallestDistance = distance;
             }
         }
-        System.out.println("Round closed: guesses=" + guesses + ", target=" + target + " -> winner " + best);
+        System.out.println("Round closed: guesses=" + guesses + ", target=" + targetValue + " -> winner " + winningGuess);
         guesses.clear();
-        replicate(Op.GUESS, best);
+        replicateOperation(Op.GUESS, winningGuess);
     }
 
-    /** @return la valeur commitée, ou -1 si le quorum n'a pas été atteint. */
-    public synchronized int replicate(Op op, int value) {
-        final int epoch = node.getEpoch();
+    /**
+     * Leader journalise d'abord l'entrée en proposed dans son propre log.
+     * Puis appelle propose sur tous les followers en parallèle et renvoie le nombre de 1.
+     * Quand le quorum est atteint, le leader commit chez lui puis diffuse le commit aux followers.
+     * @param op opération (WRITE ou GUESS).
+     * @param operationValue valeur envoyé par le client.
+     * @return operationValue si tout va bien, -1 sinon.
+     */
+    public synchronized int replicateOperation(Op op, int operationValue) {
+        final int currentEpoch = localNode.getEpoch();
         final int seq = ++nextSeq;
 
-        // 1. le leader journalise d'abord (c'est son propre ACK)
-        node.log.append(new LogEntry(epoch, seq, op, value, Status.PROPOSED));
-        System.out.println("Leader " + node.nodeId + " PROPOSED (epoch = " + epoch + ", seq = " + seq + ") " + op + " " + value);
+        localNode.log.appendLogEntry(new LogEntry(currentEpoch, seq, op, operationValue, Status.PROPOSED));
+        System.out.println("Leader " + localNode.nodeId + " PROPOSED (epoch = " + currentEpoch + ", seq = " + seq + ") " + op + " " + operationValue);
 
-        // 2. PROPOSE à tous les followers, ACK = retour 1
-        int acks = 1 + callPeers("PROPOSE (epoch = " + epoch + ", seq = " + seq + ")",
-                p -> p.propose(epoch, seq, op, value) == 1);
+        int acknowledgementCount = 1 + executeOnFollowers("PROPOSE (epoch = " + currentEpoch + ", seq = " + seq + ")",
+                peer -> peer.propose(currentEpoch, seq, op, operationValue) == 1);
 
-        if (acks < NodeImpl.QUORUM) {
-            System.out.println("No quorum for (epoch = " + epoch + ", seq = " + seq + "): " + acks + "/" + NodeImpl.NB_NODES);
+        if (acknowledgementCount < NodeImpl.QUORUM) {
+            System.out.println("No quorum for (epoch = " + currentEpoch + ", seq = " + seq + "): " + acknowledgementCount + "/" + NodeImpl.NB_NODES);
             return -1;
         }
 
-        // (test de crash, voir plus bas)
         if (System.getProperty("crashBeforeCommit") != null) {
             Runtime.getRuntime().halt(1);
         }
 
-        // 3. quorum atteint : commit local, puis COMMIT aux followers
-        node.log.markCommitted(epoch, seq);
-        callPeers("COMMIT (epoch = " + epoch + ", seq = " + seq + ")", p -> p.commit(epoch, seq) == 1);
-        System.out.println("Leader " + node.nodeId + " COMMITTED (epoch = " + epoch + ", seq = " + seq + ") -> target = " + value);
-        return value;
+        localNode.log.markEntryAsCommitted(currentEpoch, seq);
+        executeOnFollowers("COMMIT (epoch = " + currentEpoch + ", seq = " + seq + ")", p -> p.commit(currentEpoch, seq) == 1);
+        System.out.println("Leader " + localNode.nodeId + " COMMITTED (epoch = " + currentEpoch + ", seq = " + seq + ") -> target = " + operationValue);
+        return operationValue;
     }
 
-    /** Appelle tous les autres nœuds en parallèle et renvoie le nombre de réponses positives avant le timeout. */
-    private int callPeers(String label, PeerCall call) {
-        List<Callable<Boolean>> tasks = new ArrayList<>();
+    /**
+     * Executer la même action sur tous les noeuds en simultanné et compte le nombre de ACK.
+     * @param operationLabel libbelé de l'operation
+     * @param peerCall opération à exécuter sur chaque noeud distant
+     * @return le nombre de noeuds ayant executé l'opération avec succès
+     */
+    private int executeOnFollowers(String operationLabel, PeerCall peerCall) {
+        List<Callable<Boolean>> followerTasks = new ArrayList<>();
         for (int id = 1; id <= NodeImpl.NB_NODES; id++) {
-            if (id == node.nodeId) {
+            if (id == localNode.nodeId) {
                 continue;
             }
             final int peerId = id;
-            tasks.add(() -> {
+            followerTasks.add(() -> {
                 try {
-                    boolean ok = call.run(node.getPeer(peerId));
-                    System.out.println(label + " -> Node " + peerId + " : " + (ok ? "Ok" : "refused"));
-                    return ok;
+                    boolean operationSucceeded = peerCall.run(localNode.getPeer(peerId));
+                    System.out.println(operationLabel + " -> Node " + peerId + " : " + (operationSucceeded ? "Ok" : "refused"));
+                    return operationSucceeded;
                 } catch (Exception e) {
-                    System.out.println(label + " -> Node " + peerId + " : unreachable");
+                    System.out.println(operationLabel + " -> Node " + peerId + " : unreachable");
                     return false;
                 }
             });
         }
 
-        int ok = 0;
+        int successfulAcknowledgmentCount = 0;
         try {
-            for (Future<Boolean> f : pool.invokeAll(tasks, ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                if (f.isCancelled()) {
+            for (Future<Boolean> future : pool.invokeAll(followerTasks, ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                if (future.isCancelled()) {
                     continue;
                 }
                 try {
-                    if (f.get()) {
-                        ok++;
+                    if (future.get()) {
+                        successfulAcknowledgmentCount++;
                     }
                 } catch (ExecutionException ignored) {}
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        return ok;
+        return successfulAcknowledgmentCount;
+    }
+
+    /**
+     * Synchronise le journal du leader avec les followers.
+     * @return true si le quorum est atteint, false sinon
+     */
+    public boolean synchronizeFollowers() {
+        final int currentEpoch = localNode.getEpoch();
+        final List<LogEntry> logSnapshot = localNode.log.createLogSnapshot();
+        int acknowledgementCount = 1 + executeOnFollowers("SYNC (epoch = " + currentEpoch + ")",
+                peer -> peer.syncLog(currentEpoch, localNode.nodeId, logSnapshot));
+        if (acknowledgementCount < NodeImpl.QUORUM) {
+            return false;
+        }
+        localNode.log.markAllEntriesAsCommitted();
+        return true;
     }
 }
