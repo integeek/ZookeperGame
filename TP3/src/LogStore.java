@@ -70,7 +70,9 @@ public class LogStore {
      * @param e entrée à ajouter.
      */
     public synchronized void append(LogEntry e) {
-        if (find(e.epoch, e.seq) != null) return;
+        if (find(e.epoch, e.seq) != null) {
+            return;
+        }
         entries.add(copy(e));
         persist();
     }
@@ -83,20 +85,26 @@ public class LogStore {
      */
     public synchronized boolean markCommitted(int epoch, int seq) {
         LogEntry e = find(epoch, seq);
-        if (e == null) return false;
+        if (e == null) {
+            return false;
+        }
         e.status = Status.COMMITTED;
         persist();
         return true;
     }
 
     public synchronized void markAllCommitted() {
-        for (LogEntry e : entries) e.status = Status.COMMITTED;
+        for (LogEntry e : entries) {
+            e.status = Status.COMMITTED;
+        }
         persist();
     }
 
     public synchronized void replaceAll(List<LogEntry> newEntries) {
         entries.clear();
-        for (LogEntry e : newEntries) entries.add(copy(e));
+        for (LogEntry e : newEntries) {
+            entries.add(copy(e));
+        }
         persist();
     }
 
@@ -106,14 +114,20 @@ public class LogStore {
 
     public synchronized LogEntry getLastCommitted() {
         for (int i = entries.size() - 1; i >= 0; i--) {
-            if (entries.get(i).status == Status.COMMITTED) return copy(entries.get(i));
+            if (entries.get(i).status == Status.COMMITTED) {
+                return copy(entries.get(i));
+            }
         }
         return null;
     }
 
     public synchronized int committedCount() {
         int n = 0;
-        for (LogEntry e : entries) if (e.status == Status.COMMITTED) n++;
+        for (LogEntry e : entries) {
+            if (e.status == Status.COMMITTED) {
+                n++;
+            }
+        }
         return n;
     }
 

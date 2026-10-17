@@ -23,6 +23,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     private static final long HEARTBEAT_TIMEOUT_BEFORE_ELECTION = 15_000;
     private static final long ELECTION_DURATION = 2;
     static final int NB_NODES = 3;
+    private final int totalNumberOfNodes;
     static final int QUORUM = NB_NODES / 2 + 1;
     volatile boolean electionStarted = false;
     private ScheduledFuture<?> heartbeatTask;
@@ -39,11 +40,12 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     final LogStore log;
 
 
-    public NodeImpl(int nodeId) throws IOException {
+    public NodeImpl(int nodeId, int totalNumberOfNodes) throws IOException {
         super();
         this.nodeId = nodeId;
         this.lastHeartbeat = System.currentTimeMillis();
         this.log = new LogStore(nodeId);
+        this.totalNumberOfNodes = totalNumberOfNodes;
     }
 
     /**
@@ -53,7 +55,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
      * @throws Exception
      */
     NodeServer getPeer(int id) throws Exception {
-        return (NodeServer) LocateRegistry.getRegistry("localhost", 5000 + id).lookup("Node"+id);
+        return (NodeServer) LocateRegistry.getRegistry("localhost", 5000 + id).lookup("Node" + id);
     }
 
     /**
@@ -77,13 +79,13 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
      * Pour chaque serveur du réseau, il vérifie si le heartbeat est reçu ou non.
      */
     void sendHeartBeats() {
-        for (int id = 1; id <= 3; id++) {
+        for (int id = 1; id <= totalNumberOfNodes; id++) {
             if (id == nodeId) {
                 continue;
             }
             try {
                 boolean received = getPeer(id).heartbeat(epoch, nodeId);
-                System.out.println("Heartbeat sent to Node " + id + " | accepted = " + received);
+                System.out.println("Heartbeat sent to Node " + id + ", accepted = " + received);
             } catch (Exception e) {
                 System.out.println("Cannot contact Node " + id);
             }
@@ -98,7 +100,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
             }
         }
         log.append(new LogEntry(proposeEpoch, proposeSeq, op, value, Status.PROPOSED));
-        System.out.println("Node " + nodeId + " logged PROPOSED (" + proposeEpoch + "," + proposeSeq + ")");
+        System.out.println("Node " + nodeId + " logged PROPOSED (epoch = " + proposeEpoch + ", seq = " + proposeSeq + ")");
         return 1;
     }
 
@@ -111,7 +113,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     public int commit(int commitEpoch, int commitSeq) throws RemoteException {
         boolean ok = log.markCommitted(commitEpoch, commitSeq);
         if (ok) {
-            System.out.println("Node " + nodeId + " COMMITTED (" + commitEpoch + "," + commitSeq + ")");
+            System.out.println("Node " + nodeId + " COMMITTED (epoch = " + commitEpoch + ", seq = " + commitSeq + ")");
         }
         return ok ? 1 : 0;
     }
@@ -120,11 +122,6 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     public int getTarget() {
         LogEntry e = log.getLastCommitted();
         return e == null ? -1 : e.value;
-    }
-
-    private int[] lastTag() {
-        LogEntry last = log.getLast();
-        return last == null ? new int[]{0, 0} : new int[]{last.epoch, last.seq};
     }
 
     /**
@@ -171,7 +168,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
 
         long elasped = System.currentTimeMillis() - lastHeartbeat;
         if (elasped > HEARTBEAT_TIMEOUT_BEFORE_ELECTION && !electionStarted) {
-            System.out.println("Node " + nodeId + " : no heartbeat received for " + HEARTBEAT_TIMEOUT_BEFORE_ELECTION + "  seconds");
+            System.out.println("Node " + nodeId + " : no heartbeat received for " + HEARTBEAT_TIMEOUT_BEFORE_ELECTION + " milliseconds");
             startElection();
         }
     }
@@ -301,7 +298,9 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     // follower
     @Override
     public synchronized boolean syncLog(int newEpoch, int from, List<LogEntry> leaderLog) {
-        if (newEpoch < epoch) return false;
+        if (newEpoch < epoch) {
+            return false;
+        }
         log.replaceAll(leaderLog);
         log.markAllCommitted();
         epoch = newEpoch;
@@ -318,9 +317,13 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
      * @param s numéro de séquence du candidat
      */
     void broadcastCandidacy(int e, int s) {
-        for (int id = 1; id <= 3; id++) {
-            if (id == nodeId) continue;
-            try { getPeer(id).election(e, s, nodeId); }
+        for (int id = 1; id <= totalNumberOfNodes; id++) {
+            if (id == nodeId) {
+                continue;
+            }
+            try {
+                getPeer(id).election(e, s, nodeId);
+            }
             catch (Exception ex) { System.out.println("Cannot contact Node " + id); }
         }
     }
@@ -347,5 +350,4 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
     @Override
     public int getRound() { return log.committedCount(); }
-
 }

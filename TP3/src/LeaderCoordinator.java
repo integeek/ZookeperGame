@@ -8,7 +8,9 @@ public class LeaderCoordinator {
     private static final long ACK_TIMEOUT_MS = 2000;
 
     @FunctionalInterface
-    private interface PeerCall { boolean run(NodeServer peer) throws Exception; }
+    private interface PeerCall {
+        boolean run(NodeServer peer) throws Exception;
+    }
 
     private final NodeImpl node;
     private final ExecutorService pool = Executors.newCachedThreadPool();
@@ -32,7 +34,9 @@ public class LeaderCoordinator {
     }
 
     public synchronized int write(int value) {
-        if (value < 0 || value > 100) return -1;
+        if (value < 0 || value > 100) {
+            return -1;
+        }
         clearRound();
         return replicate(Op.WRITE, value);
     }
@@ -40,12 +44,13 @@ public class LeaderCoordinator {
 
     /** @return le numéro du round en cours, ou -1 si refusé. */
     public synchronized int submitGuess(int clientId, int value) {
-        if (value < 0 || value > 100 || node.getTarget() == -1) return -1;
+        if (value < 0 || value > 100 || node.getTarget() == -1) {
+            return -1;
+        }
         guesses.put(clientId, value);
         if (roundTask == null) {
             final int epochAtStart = node.getEpoch();
-            roundTask = roundTimer.schedule(() -> closeRound(epochAtStart),
-                    ROUND_DURATION_MS, TimeUnit.MILLISECONDS);
+            roundTask = roundTimer.schedule(() -> closeRound(epochAtStart), ROUND_DURATION_MS, TimeUnit.MILLISECONDS);
         }
         System.out.println("Guess " + value + " from client " + clientId + " (" + guesses.size() + " this round)");
         return node.getRound();
@@ -61,7 +66,10 @@ public class LeaderCoordinator {
         int best = -1, bestDist = Integer.MAX_VALUE;
         for (int g : guesses.values()) {
             int d = Math.abs(g - target);
-            if (d < bestDist || (d == bestDist && g < best)) { best = g; bestDist = d; }
+            if (d < bestDist || (d == bestDist && g < best)) {
+                best = g;
+                bestDist = d;
+            }
         }
         System.out.println("Round closed: guesses=" + guesses + ", target=" + target + " -> winner " + best);
         guesses.clear();
@@ -75,24 +83,26 @@ public class LeaderCoordinator {
 
         // 1. le leader journalise d'abord (c'est son propre ACK)
         node.log.append(new LogEntry(epoch, seq, op, value, Status.PROPOSED));
-        System.out.println("Leader " + node.nodeId + " PROPOSED (" + epoch + "," + seq + ") " + op + " " + value);
+        System.out.println("Leader " + node.nodeId + " PROPOSED (epoch = " + epoch + ", seq = " + seq + ") " + op + " " + value);
 
         // 2. PROPOSE à tous les followers, ACK = retour 1
-        int acks = 1 + callPeers("PROPOSE (" + epoch + "," + seq + ")",
+        int acks = 1 + callPeers("PROPOSE (epoch = " + epoch + ", seq = " + seq + ")",
                 p -> p.propose(epoch, seq, op, value) == 1);
 
         if (acks < NodeImpl.QUORUM) {
-            System.out.println("No quorum for (" + epoch + "," + seq + "): " + acks + "/" + NodeImpl.NB_NODES);
+            System.out.println("No quorum for (epoch = " + epoch + ", seq = " + seq + "): " + acks + "/" + NodeImpl.NB_NODES);
             return -1;
         }
 
         // (test de crash, voir plus bas)
-        if (System.getProperty("crashBeforeCommit") != null) Runtime.getRuntime().halt(1);
+        if (System.getProperty("crashBeforeCommit") != null) {
+            Runtime.getRuntime().halt(1);
+        }
 
         // 3. quorum atteint : commit local, puis COMMIT aux followers
         node.log.markCommitted(epoch, seq);
-        callPeers("COMMIT (" + epoch + "," + seq + ")", p -> p.commit(epoch, seq) == 1);
-        System.out.println("Leader " + node.nodeId + " COMMITTED (" + epoch + "," + seq + ") -> target = " + value);
+        callPeers("COMMIT (epoch = " + epoch + ", seq = " + seq + ")", p -> p.commit(epoch, seq) == 1);
+        System.out.println("Leader " + node.nodeId + " COMMITTED (epoch = " + epoch + ", seq = " + seq + ") -> target = " + value);
         return value;
     }
 
@@ -100,12 +110,14 @@ public class LeaderCoordinator {
     private int callPeers(String label, PeerCall call) {
         List<Callable<Boolean>> tasks = new ArrayList<>();
         for (int id = 1; id <= NodeImpl.NB_NODES; id++) {
-            if (id == node.nodeId) continue;
+            if (id == node.nodeId) {
+                continue;
+            }
             final int peerId = id;
             tasks.add(() -> {
                 try {
                     boolean ok = call.run(node.getPeer(peerId));
-                    System.out.println(label + " -> Node " + peerId + " : " + (ok ? "OK" : "refused"));
+                    System.out.println(label + " -> Node " + peerId + " : " + (ok ? "Ok" : "refused"));
                     return ok;
                 } catch (Exception e) {
                     System.out.println(label + " -> Node " + peerId + " : unreachable");
@@ -117,8 +129,14 @@ public class LeaderCoordinator {
         int ok = 0;
         try {
             for (Future<Boolean> f : pool.invokeAll(tasks, ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                if (f.isCancelled()) continue;               // timeout dépassé
-                try { if (f.get()) ok++; } catch (ExecutionException ignored) {}
+                if (f.isCancelled()) {
+                    continue;
+                }
+                try {
+                    if (f.get()) {
+                        ok++;
+                    }
+                } catch (ExecutionException ignored) {}
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
