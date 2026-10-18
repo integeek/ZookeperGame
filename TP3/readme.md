@@ -6,11 +6,11 @@
 |---|---|
 | `NodeServer.java` | RMI interface shared by all nodes and clients |
 | `NodeImpl.java` | Node logic: heartbeat, election, log synchronisation, forwarding |
-| `LeaderCoordinator.java` | Leader role: assigns `(epoch, seq)`, sends proposals, collects ACKs, broadcasts COMMIT, runs the game rounds |
-| `LogStore.java` | Persistent log (one file per node: `log-node<ID>.txt`) |
+| `LeaderCoordinator.java` | Method specific to the leader |
+| `LogStore.java` | Log journal stored as a .txt file |
 | `LogEntry.java`, `Op.java`, `Status.java` | Log entry format (`epoch;seq;op;value;status`) |
 | `NodeMain.java` | Starts one node |
-| `ClientApp.java` | Command-line client |
+| `ClientApp.java` | user interface that manages clients |
 
 ## Requirements
 
@@ -66,7 +66,6 @@ The first line printed is `Connected to Node X`.
 |---|---|
 | `write <0-100>` | Sets the initial target. Only accepted when no target exists yet |
 | `guess <0-100>` | Submits a guess for the current round |
-| `target` | The target is hidden, so this only prints a reminder |
 | `quit` | Exits the client |
 
 ## Simulate a leader crash

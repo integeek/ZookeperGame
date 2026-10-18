@@ -9,14 +9,15 @@ public class ClientApp {
     private static NodeServer connectedNode;
     private static int preferredNodeId;
     private static int myTargetRound = -1;
+    static final int NB_NODES = 3;
 
     /**
-     * Cherche un noeud du cluster qui répond, en commençant par le noeud préféré puis en essayant les suivants.
-     * @return le noeud auquel on est connecté, null sinon
+     * Searches for a cluster node that responds, starting with the preferred node and then trying the others.
+     * @return the node to which one is connected, null otherwise
      */
     private static NodeServer connectToAvailableNode() {
-        for (int offset = 0; offset < NodeImpl.NB_NODES; offset++) {
-            int id = (preferredNodeId - 1 + offset) % NodeImpl.NB_NODES + 1;
+        for (int offset = 0; offset < NB_NODES; offset++) {
+            int id = (preferredNodeId - 1 + offset) % NB_NODES + 1;
             try {
                 NodeServer candidateNode = (NodeServer) LocateRegistry.getRegistry("localhost", 5000 + id).lookup("Node" + id);
                 System.out.println("Connected to Node " + id);
@@ -27,9 +28,9 @@ public class ClientApp {
     }
 
     /**
-     * Execute une opération sur le noeud connecté avec une reconnexion automatique en cas d'échec.
-     * @param nodeOperation opération à exécuter sur le noeud
-     * @return le résultat de l'opération, -1 si problème
+     * Performs an operation on the connected node, with automatic reconnection in the event of a failure.
+     * @param nodeOperation operation to be performed on the node
+     * @return the result of the operation, -1 if there is a problem
      */
     private static synchronized int executeWithRetry(NodeOperation nodeOperation) {
         for (int attemptNumber = 0; attemptNumber < 2; attemptNumber++) {
@@ -61,15 +62,15 @@ public class ClientApp {
 
         getThread().start();
 
-        System.out.println("Commands : write <x> | guess <x> | target | quit");
+        System.out.println("Commands : write <x> | guess <x> | quit");
         Scanner sc = new Scanner(System.in);
         while (sc.hasNextLine()) {
             String[] commandParts = sc.nextLine().trim().split("\\s+");
             try {
                 switch (commandParts[0]) {
                     case "write" -> {
-                        int cur = executeWithRetry(NodeServer::getTarget);
-                        if (cur != -1) {
+                        int existingTarget = executeWithRetry(NodeServer::getTarget);
+                        if (existingTarget != -1) {
                             System.out.println("A target already exists, use guess");
                             break;
                         }
@@ -96,7 +97,6 @@ public class ClientApp {
                         int r = executeWithRetry(n -> n.forward(Op.GUESS, Integer.parseInt(commandParts[1]), clientId));
                         System.out.println(r == -1 ? "Guess rejected" : "Guess recorded (round " + r + ")");
                     }
-                    case "target" -> System.out.println("The target is hidden");
                     case "quit" -> {
                         return;
                     }
@@ -109,9 +109,9 @@ public class ClientApp {
     }
 
     /**
-     * Construit un thread de surveillance.
-     * Toutes les secondes, il demande au cluster le numéro de round et préviens le joueur quand une nouvelle cible a été choisie.
-     * @return le thread de surveillance des rounds.
+     * Creates a monitoring thread.
+     * Every second, it requests the round number from the cluster and notifies the player when a new target has been chosen.
+     * @return the round-monitoring thread.
      */
     private static Thread getThread() {
         Thread poller = new Thread(() -> {

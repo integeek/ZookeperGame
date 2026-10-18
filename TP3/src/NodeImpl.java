@@ -19,7 +19,8 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     int bestCandidateEpoch = -1;
     int bestCandidateSeq = -1;
 
-    private final int totalNumberOfNodes;
+    final int totalNumberOfNodes;
+    final int quorum;
     volatile boolean electionStarted = false;
     volatile boolean leaderReady = false;
     private ScheduledFuture<?> heartbeatTask;
@@ -30,8 +31,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     private static final long TIME_BETWEEN_HEARTBEAT = 10;
     private static final long HEARTBEAT_TIMEOUT_BEFORE_ELECTION = 15_000;
     private static final long ELECTION_DURATION = 2;
-    static final int NB_NODES = 3;
-    static final int QUORUM = NB_NODES / 2 + 1;
+
 
     public NodeImpl(int nodeId, int totalNumberOfNodes) throws IOException {
         super();
@@ -39,6 +39,7 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
         this.lastHeartbeat = System.currentTimeMillis();
         this.log = new LogStore(nodeId);
         this.totalNumberOfNodes = totalNumberOfNodes;
+        this.quorum = totalNumberOfNodes / 2 + 1;
     }
 
     synchronized int getEpoch() {
@@ -50,10 +51,10 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Permet de retrouver un noeud grâce à son id.
-     * Permet ensuite d'appeler des méthodes à distance sur un pair.
-     * @param id id du noeud que l'on veut renvoyer.
-     * @return le stub RMI correspondant à l'id.
+     * Allows a node to be retrieved using its Id.
+     * It then allows for calling methods remotely on a peer.
+     * @param id Id of the node that we want to return.
+     * @return the RMI stub corresponding to the Id.
      * @throws Exception
      */
     NodeServer getPeer(int id) throws Exception {
@@ -61,9 +62,9 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Démarre le fonctionnement du noeud, le noeud 1 est initialement le leader.
-     * Si le serveur est un leader, il envoie des heartbeat toutes les 10 secondes aux autres serveurs.
-     * Sinon, le follower vérifie toutes les secondes de quand date le dernier heartbeat.
+     * Starts the node's operation, node 1 is initially the leader.
+     * If the server is a leader, it sends heartbeats to the other servers every 10 seconds.
+     * Otherwise, the follower checks every second when the last heartbeat occurred.
      */
     public void start() {
         if (nodeId == 1) {
@@ -77,9 +78,9 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Méthode pour le leader.
-     * Envoie un hearbeat à chaque noeud du réseau pour leur signifier qu'il est vivant et communiquer son epoch et son id.
-     * Affiche aussi si le heartbeat est reçu ou non.
+     * For the leader.
+     * Sends a heartbeat to every node in the network to signal that it is alive and to communicate its epoch and Id.
+     * Also displays whether the heartbeat is received.
      */
     void sendHeartBeats() {
         for (int id = 1; id <= totalNumberOfNodes; id++) {
@@ -96,14 +97,14 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Fonction pour les followers.
-     * Leader envoie une proposition d'opération et chaque follower répond s'il accepte de la logger.
-     * Créer une entrée de log avec le statut proposed si la proposition ne vient pas d'un leader perimé.
-     * @param proposeEpoch epoch du leader qui émet la proposiion
-     * @param proposeSeq numéro de séquence de la proposition dans l'epoch du leader
-     * @param op opération à journaliser (WRITE ou GUESS)
-     * @param value valeur associé à l'opération
-     * @return 1 si la proposition a été journaliser (équivalent de ACK), 0 sinon
+     * For the followers.
+     * The leader sends a proposal for an operation, and each follower responds whether they agree to log it.
+     * Create a log entry with the status PROPOSED if the proposal does not originate from an outdated leader.
+     * @param proposeEpoch epoch of the leader who issues the proposal
+     * @param proposeSeq sequence number of the proposal within the leader's epoch
+     * @param op operation to be logged (WRITE or GUESS)
+     * @param value value associated with the operation
+     * @return 1 if the proposal has been logged (equivalent to ACK), 0 otherwise
      * @throws RemoteException
      */
     @Override
@@ -119,11 +120,11 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Pour les followers.
-     * LogStore recherche l'entrée identifié par le couple (epoch, seq) et fait passer son statut de PROPOSED à COMMITTED.
+     * For the followers.
+     * LogStore searches for the entry identified by the pair (epoch, seq) and updates its status from PROPOSED to COMMITTED.
      * @param commitEpoch epoch de la proposition
-     * @param commitSeq numéro de séquence de la proposition
-     * @return 1 si le commit a été effectué, 0 si échec.
+     * @param commitSeq proposal epoch
+     * @return 1 if the commit was successful, 0 if it failed.
      * @throws RemoteException
      */
     @Override
@@ -136,8 +137,8 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Récupère la valeur de la dernière opération validée dans le journal.
-     * @return la valeur de la dernière entrée validée, -1 sinon.
+     * Retrieves the value of the last validated operation in the journal.
+     * @return the value of the last validated entry, -1 otherwise.
      */
     @Override
     public int getTarget() {
@@ -146,13 +147,13 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Méthode pour les followers.
-     * Refuse les heartbeats provenant d'une epoch plus ancienne ou si le noeud est leader et reçoit un heartbeat d'un noeud d'id supérieur.
-     * S'il est accepté, met à jour le leader connu, l'epoch, la date de récéption et l'état de l'élection.
-     * Le noeud arrête également sa tâche d'envoi de heartbeats.
-     * @param heartbeatEpoch l'epoch du heartbeat envoyé par le leader.
-     * @param from : id du leader
-     * @return true si le heartbeat est accepté, false sinon
+     * For the followers.
+     * Reject heartbeats originating from an earlier epoch, or if the node is the leader and receives a heartbeat from a node with a higher Id.
+     * If accepted, it updates the known leader, the epoch, the date of receipt, and the election state.
+     * The node also stops its task of sending heartbeats.
+     * @param heartbeatEpoch the epoch of the heartbeat sent by the leader.
+     * @param from : leader Id.
+     * @return true if the heartbeat is accepted, false otherwise.
      * @throws RemoteException
      */
     @Override
@@ -179,9 +180,9 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Méthode pour les followers.
-     * Vérifie si le leader envoie toujours des heartbeats.
-     * Si le dernier heartbeat date de plus de HEARTBEAT_TIMEOUT_BEFORE_ELECTION secondes, déclenche une élection si une n'est pas déjà en cours.
+     * For the followers.
+     * Check whether the leader is still sending heartbeats.
+     * If the last heartbeat occurred more than HEARTBEAT_TIMEOUT_BEFORE_ELECTION seconds ago, trigger an election, provided one is not already underway.
      */
     void checkHeartbeat() {
         if (leaderId == nodeId) {
@@ -196,8 +197,8 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Démarre une élection.
-     * Le noeud se déclare initialement comme le meilleur candidat, mémorise son état, diffuse sa candidature puis planifie la fin.
+     * Start an election.
+     * The node initially declares itself the best candidate, stores its state, broadcasts its candidacy, and then schedules the termination.
      */
     void startElection() {
         int currentEpoch;
@@ -219,15 +220,15 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Compare un candidat avec le meilleur candidat actuellement connu.
-     * L'ordre de priorité est :
-     * 1. L'epoch la plus élevée.
-     * 2. Le numéro de séquence le plus élevé si les epochs sont égales.
-     * 3. L'identifiant le plus petit si les deux valeurs précendentes sont égales.
-     * @param candidateEpoch epoch du candidat reçu.
-     * @param candidateSeq numéro de séquence du candidat reçu.
-     * @param candidateId identifiant du candidat reçu.
-     * @return true si le candidat est meilleur que le candidat actuel.
+     * Compare a candidate with the best candidate currently known.
+     * The order of priority is :
+     * 1. The highest epoch.
+     * 2. The highest sequence number if the epochs are equal.
+     * 3. The smallest identifier if the two preceding values are equal.
+     * @param candidateEpoch epoch of the candidate.
+     * @param candidateSeq sequence number of the candidate.
+     * @param candidateId Candidate identifier.
+     * @return true if the candidate is better than the current candidate, false otherwise.
      */
     private boolean isBetterCandidate(int candidateEpoch, int candidateSeq, int candidateId) {
         if (candidateEpoch != bestCandidateEpoch) {
@@ -241,15 +242,14 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
         return candidateId < bestCandidateId;
     }
 
-
     /**
-     * Pour les followers.
-     * Reçoit une candidature provenant d'une autre noeud.
-     * Si ce noeud ne participe pas encore à une élection, il la rejoint, se déclare candidat et programme la fin de celle-ci.
-     * Il compare ensuite le candidat reçu avec le meilleur candidat connu.
-     * @param candidateEpoch epoch annoncé par le candidat.
-     * @param candidateSeq numéro de séquence annonce par le candidat.
-     * @param from identifiant du noeud candidat.
+     * For the followers.
+     * Receives an application from another node.
+     * If this node is not yet participating in an election, it joins it, declares itself a candidate, and schedules the election's conclusion.
+     * He then compares the candidate who has been received with the best known candidate.
+     * @param candidateEpoch epoch announced by the candidate.
+     * @param candidateSeq sequence number announced by the candidate.
+     * @param from candidate node identifier.
      */
     @Override
     public synchronized void election(int candidateEpoch, int candidateSeq, int from) {
@@ -279,9 +279,29 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Termine l'élection et détermine si ce noeud devient leader.
-     * Si le noeud est le meilleur candidat connu, il devient leader.
-     * Sinon, il reconnait le meilleur candidat comme leader.
+     * Broadcasts this node's candidacy to all other nodes.
+     * Each node receives the epoch, the sequence number, and the candidate's identifier in order to compare the candidacies.
+     * @param candidateEpoch candidate epoch.
+     * @param candidateSequence candidate sequence number.
+     */
+    void broadcastCandidacy(int candidateEpoch, int candidateSequence) {
+        for (int id = 1; id <= totalNumberOfNodes; id++) {
+            if (id == nodeId) {
+                continue;
+            }
+            try {
+                getPeer(id).election(candidateEpoch, candidateSequence, nodeId);
+            }
+            catch (Exception ex) {
+                System.out.println("Cannot contact Node " + id);
+            }
+        }
+    }
+
+    /**
+     * Conclude the election and determine whether this node becomes the leader.
+     * If the node is the best-known candidate, it becomes the leader.
+     * Otherwise, he recognizes the best candidate as the leader.
      */
     void finishElection() {
         boolean wonElection;
@@ -302,9 +322,9 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Fait passer ce noeud au rôle leader.
-     * Augmente l'epoch de 1 et réinitialise la séquence à 0.
-     * Envoie également ses logs à tous ses pais et attend un quorum d'ACK.
+     * Promote this node to the leader role.
+     * Increments the epoch by 1 and resets the sequence to 0.
+     * It also sends its logs to all its peers and waits for a quorum of ACKs.
      */
     void becomeLeader() {
         synchronized (this) {
@@ -323,12 +343,12 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Le leader appelle cette méthode sur chaque follower pour leur imposer son log.
-     * Remplace le log local par celui du leader, marque tout COMMITED, adopter l'epoch et le leader.
-     * @param newEpoch nouvelle epoch
-     * @param from Id du nouveau leader
-     * @param leaderLog Log du leader
-     * @return true si pas d'erreur, false si le leader est perimé.
+     * The leader invokes this method on each follower to impose its log upon them.
+     * Replace the local log with the leader's log, mark everything as COMMITTED, and adopt the epoch and the leader.
+     * @param newEpoch new epoch.
+     * @param from Id of the new leader.
+     * @param leaderLog Leader's log.
+     * @return true if no error, false if the leader is outdated.
      */
     @Override
     public synchronized boolean syncLog(int newEpoch, int from, List<LogEntry> leaderLog) {
@@ -345,32 +365,12 @@ public class NodeImpl extends UnicastRemoteObject implements NodeServer {
     }
 
     /**
-     * Diffuse la candidature de ce noeud à tous les autres noeuds.
-     * Chaque noeud reçoit l'epoch, le numéro de séquence et l'identifiant du candidat afin de comparer les candidatures.
-     * @param candidateEpoch epoch du candidat
-     * @param candidateSequence numéro de séquence du candidat
-     */
-    void broadcastCandidacy(int candidateEpoch, int candidateSequence) {
-        for (int id = 1; id <= totalNumberOfNodes; id++) {
-            if (id == nodeId) {
-                continue;
-            }
-            try {
-                getPeer(id).election(candidateEpoch, candidateSequence, nodeId);
-            }
-            catch (Exception ex) {
-                System.out.println("Cannot contact Node " + id);
-            }
-        }
-    }
-
-    /**
-     * Si le noeud est leader, il traite la requete.
-     * Sinon, il la relaie au leader.
-     * @param op opération reçue par le noeud
-     * @param value valeur reçue par le noeud
-     * @param fromClient client d'origine.
-     * @return si write, la valeur commitée, pour guess, le numéro de round et -1 so refus.
+     * If the node is the leader, it processes the request.
+     * Otherwise, he passes it on to the leader.
+     * @param op operation received by the node
+     * @param value value received by the node
+     * @param fromClient original client.
+     * @return For write, the value is committed, for guess, the round number is provided, and -1 if rejection.
      * @throws RemoteException
      */
     @Override

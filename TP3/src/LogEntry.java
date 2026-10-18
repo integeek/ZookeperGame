@@ -18,7 +18,7 @@ public class LogEntry implements Serializable {
     }
 
     /**
-     * Converti l'entrée en texte qui peut ensuite être enregistré dans le fichier de lo.
+     * Converts the input into text that can then be saved to the log file.
      * @return epoch;seq;op;value;status.
      */
     public String toLine() {
@@ -26,9 +26,9 @@ public class LogEntry implements Serializable {
     }
 
     /**
-     * Construit un objet LogEntry à partir d'une ligne.
-     * @param line
-     * @return le logEntry construit
+     * Constructs a LogEntry object from a text line in the sequence epoch;seq;operation;value;status.
+     * @param line : line containing information from the journal entry.
+     * @return the journal entry reconstructed from the line.
      */
     public static LogEntry fromLine(String line) {
         String[] p = line.split(";");
@@ -38,6 +38,6 @@ public class LogEntry implements Serializable {
 
     @Override
     public String toString() {
-        return "(" + epoch + "," + seq + ") " + op + " " + value + " " + status;
+        return "(epoch = " + epoch + ", seq = " + seq + ") " + op + " " + value + " " + status;
     }
 }

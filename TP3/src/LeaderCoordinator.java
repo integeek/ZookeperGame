@@ -25,7 +25,7 @@ public class LeaderCoordinator {
     }
 
     /**
-     * Abandonne le round en cours en effaçant tous les guess et en empéchant la tâche de s'exécuter.
+     * Abandons the current round by clearing all guesses and preventing the task from executing.
      */
     private void cancelCurrentRound() {
         guesses.clear();
@@ -41,10 +41,10 @@ public class LeaderCoordinator {
     }
 
     /**
-     * Méthode du leader qui traite une écrite d'un client.
-     * Seule les valeurs de 0 à 100 sont acceptées.
-     * @param valueToWrite la valeur à écrire
-     * @return la valeur si l'entrée est commitée, -1 sinon
+     * Processes a client entry.
+     * Only values from 0 to 100 are accepted.
+     * @param valueToWrite the value to be written.
+     * @return the value if the entry is committed, -1 otherwise.
      */
     public synchronized int writeAndReplicate(int valueToWrite) {
         if (valueToWrite < 0 || valueToWrite > 100) {
@@ -56,11 +56,11 @@ public class LeaderCoordinator {
 
 
     /**
-     * Enreigstre le guess d'un client dans le round en cours. Au premier guess, lance un compteur de 5 secondes.
-     * 2 refus possibles : valeurs hors des limites ou pas de target commitée.
-     * @param clientId id du client ayant fait le guess
+     * Record a client's guess for the current round. Upon the first guess, start a 5-second timer.
+     * 2 possible rejections: values outside the limits or no committed target.
+     * @param clientId Id of the customer who made the guess.
      * @param guessValue valeur envoyée
-     * @return le numéro du round, -1 si un problème
+     * @return the round number, -1 if there is a problem.
      */
     public synchronized int submitGuess(int clientId, int guessValue) {
         if (guessValue < 0 || guessValue > 100 || localNode.getTarget() == -1) {
@@ -76,10 +76,10 @@ public class LeaderCoordinator {
     }
 
     /**
-     * Méthode appelée 5 secodes après le premier guess.
-     * Désigne le gagnant du round (le guess le plus proche de la target) et le réplique comme la nouvelle valeur commitée.
-     * Round abandonné s'il n'y a pas de guess, le noeud n'est plus leader ou si les guess datent d'un autre mandat.
-     * @param epochAtStart
+     * Method called 5 seconds after the first guess.
+     * Designates the round winner (the guess closest to the target) and sets it as the new committed value.
+     * The round is abandoned if there are no guesses, if the node is no longer the leader, or if the guesses date from a different term.
+     * @param epochAtStart epoch at the start of the round
      */
     private synchronized void closeRound(int epochAtStart) {
         roundTask = null;
@@ -92,7 +92,7 @@ public class LeaderCoordinator {
         int smallestDistance = Integer.MAX_VALUE;
         for (int guess : guesses.values()) {
             int distance = Math.abs(guess - targetValue);
-            //Le gagnant est le plus proche de la cible, si égalité, c'est le plus petit guess si gagne
+            //The winner is the one closest to the target. In the event of a tie, the person with the lower guess wins.
             if (distance < smallestDistance || (distance == smallestDistance && guess < winningGuess)) {
                 winningGuess = guess;
                 smallestDistance = distance;
@@ -104,12 +104,12 @@ public class LeaderCoordinator {
     }
 
     /**
-     * Leader journalise d'abord l'entrée en proposed dans son propre log.
-     * Puis appelle propose sur tous les followers en parallèle et renvoie le nombre de 1.
-     * Quand le quorum est atteint, le leader commit chez lui puis diffuse le commit aux followers.
-     * @param op opération (WRITE ou GUESS).
-     * @param operationValue valeur envoyé par le client.
-     * @return operationValue si tout va bien, -1 sinon.
+     * The leader first logs the proposed entry in its own log.
+     * Then, it propose to all followers in parallel and returns a count of 1.
+     * Once the quorum is reached, the leader commits locally and then propagates the commit to the followers.
+     * @param op operation (WRITE or GUESS).
+     * @param operationValue value sent by the client.
+     * @return operationValue if all goes well, -1 otherwise.
      */
     public synchronized int replicateOperation(Op op, int operationValue) {
         final int currentEpoch = localNode.getEpoch();
@@ -121,13 +121,9 @@ public class LeaderCoordinator {
         int acknowledgementCount = 1 + executeOnFollowers("PROPOSE (epoch = " + currentEpoch + ", seq = " + seq + ")",
                 peer -> peer.propose(currentEpoch, seq, op, operationValue) == 1);
 
-        if (acknowledgementCount < NodeImpl.QUORUM) {
-            System.out.println("No quorum for (epoch = " + currentEpoch + ", seq = " + seq + "): " + acknowledgementCount + "/" + NodeImpl.NB_NODES);
+        if (acknowledgementCount < localNode.quorum) {
+            System.out.println("No quorum for (epoch = " + currentEpoch + ", seq = " + seq + "): " + acknowledgementCount + "/" + localNode.totalNumberOfNodes);
             return -1;
-        }
-
-        if (System.getProperty("crashBeforeCommit") != null) {
-            Runtime.getRuntime().halt(1);
         }
 
         localNode.log.markEntryAsCommitted(currentEpoch, seq);
@@ -137,14 +133,14 @@ public class LeaderCoordinator {
     }
 
     /**
-     * Executer la même action sur tous les noeuds en simultanné et compte le nombre de ACK.
-     * @param operationLabel libbelé de l'operation
-     * @param peerCall opération à exécuter sur chaque noeud distant
-     * @return le nombre de noeuds ayant executé l'opération avec succès
+     * Execute the same action on all nodes simultaneously and count the number of ACKs.
+     * @param operationLabel operation description.
+     * @param peerCall operation to be performed on each remote node.
+     * @return the number of nodes that have successfully executed the operation.
      */
     private int executeOnFollowers(String operationLabel, PeerCall peerCall) {
         List<Callable<Boolean>> followerTasks = new ArrayList<>();
-        for (int id = 1; id <= NodeImpl.NB_NODES; id++) {
+        for (int id = 1; id <= localNode.totalNumberOfNodes; id++) {
             if (id == localNode.nodeId) {
                 continue;
             }
@@ -180,15 +176,15 @@ public class LeaderCoordinator {
     }
 
     /**
-     * Synchronise le journal du leader avec les followers.
-     * @return true si le quorum est atteint, false sinon
+     * Synchronize the leader's log with the followers.
+     * @return true if the quorum is reached, false otherwise
      */
     public boolean synchronizeFollowers() {
         final int currentEpoch = localNode.getEpoch();
         final List<LogEntry> logSnapshot = localNode.log.createLogSnapshot();
         int acknowledgementCount = 1 + executeOnFollowers("SYNC (epoch = " + currentEpoch + ")",
                 peer -> peer.syncLog(currentEpoch, localNode.nodeId, logSnapshot));
-        if (acknowledgementCount < NodeImpl.QUORUM) {
+        if (acknowledgementCount < localNode.quorum) {
             return false;
         }
         localNode.log.markAllEntriesAsCommitted();
